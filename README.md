@@ -133,10 +133,10 @@ make cluster-stop  # Stop minikube cluster
 This project is structured as a learning exercise. Here's the progression:
 
 ### Phase 1: Project Setup & Cluster Connection
-- [ ] Set up Go module structure
-- [ ] Create Makefile for common tasks
-- [ ] Connect to Kubernetes cluster using client-go
-- [ ] Verify connection by listing namespaces
+- [x] Set up Go module structure
+- [x] Create Makefile for common tasks
+- [x] Connect to Kubernetes cluster using client-go
+- [x] Verify connection by listing namespaces
 
 ### Phase 2: Reading Secrets
 - [ ] List Secrets from the cluster

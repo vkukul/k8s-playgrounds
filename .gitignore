@@ -8,7 +8,7 @@
 *.so
 *.dylib
 bin/
-secret-operator
+/secret-operator
 
 # Test binary, built with `go test -c`
 *.test
