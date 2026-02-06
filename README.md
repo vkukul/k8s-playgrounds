@@ -139,9 +139,9 @@ This project is structured as a learning exercise. Here's the progression:
 - [x] Verify connection by listing namespaces
 
 ### Phase 2: Reading Secrets
-- [ ] List Secrets from the cluster
-- [ ] Parse custom annotations
-- [ ] Filter Secrets with expiration annotations
+- [x] List Secrets from the cluster
+- [x] Parse custom annotations
+- [x] Filter Secrets with expiration annotations
 
 ### Phase 3: Watching Resources
 - [ ] Implement SharedInformer for Secrets
