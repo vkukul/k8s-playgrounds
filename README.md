@@ -144,9 +144,9 @@ This project is structured as a learning exercise. Here's the progression:
 - [x] Filter Secrets with expiration annotations
 
 ### Phase 3: Watching Resources
-- [ ] Implement SharedInformer for Secrets
-- [ ] Handle Add/Update/Delete events
-- [ ] Understand the cache and indexer
+- [x] Implement SharedInformer for Secrets
+- [x] Handle Add/Update/Delete events
+- [x] Understand the cache and indexer
 
 ### Phase 4: Controller Logic
 - [ ] Implement work queue pattern
