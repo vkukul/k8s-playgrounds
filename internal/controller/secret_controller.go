@@ -8,25 +8,25 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 )
 
-// Annotation keys we look for on Secrets
 const (
 	AnnotationExpiresAt  = "secret-operator.example.com/expires-at"
 	AnnotationWarnBefore = "secret-operator.example.com/warn-before"
 )
 
-// SecretController watches Secrets and identifies those approaching expiration
 type SecretController struct {
 	clientset kubernetes.Interface
 	informer  cache.SharedIndexInformer
+	workqueue workqueue.TypedRateLimitingInterface[string]
 	stopCh    chan struct{}
 }
 
-// SecretInfo holds information about a Secret with expiration metadata
 type SecretInfo struct {
 	Name         string
 	Namespace    string
@@ -35,14 +35,19 @@ type SecretInfo struct {
 	DaysUntilExp int
 }
 
-// NewSecretController creates a new instance of the Secret controller
+// NewSecretController creates a controller with an informer, workqueue, and event handlers
 func NewSecretController(clientset kubernetes.Interface) *SecretController {
 	informerFactory := informers.NewSharedInformerFactory(clientset, 30*time.Second)
 	secretInformer := informerFactory.Core().V1().Secrets().Informer()
 
+	queue := workqueue.NewTypedRateLimitingQueue(
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+	)
+
 	controller := &SecretController{
 		clientset: clientset,
 		informer:  secretInformer,
+		workqueue: queue,
 		stopCh:    make(chan struct{}),
 	}
 
@@ -55,27 +60,37 @@ func NewSecretController(clientset kubernetes.Interface) *SecretController {
 	return controller
 }
 
-// Run starts the controller and blocks until stopCh is closed
-func (c *SecretController) Run() error {
+// Run starts the informer and launches the given number of workers to process the queue
+func (c *SecretController) Run(workers int) error {
 	defer runtime.HandleCrash()
+	defer c.workqueue.ShutDown()
 
-	fmt.Println("\nStarting Secret Rotation Controller...")
-	fmt.Println("Watching for Secret changes across all namespaces...")
+	fmt.Println("\nStarting Secret Rotation Controller")
+	fmt.Println("====================================")
 
+	fmt.Println("Starting informer...")
 	go c.informer.Run(c.stopCh)
 
 	fmt.Println("Waiting for informer cache to sync...")
 	if !cache.WaitForCacheSync(c.stopCh, c.informer.HasSynced) {
 		return fmt.Errorf("failed to sync informer cache")
 	}
-
 	fmt.Println("✓ Cache synced successfully")
-	fmt.Println("\nNow watching for Secret changes...")
+
+	fmt.Printf("\nStarting %d worker(s)...\n", workers)
+	for i := 0; i < workers; i++ {
+		go wait.Until(c.runWorker, time.Second, c.stopCh)
+	}
+
+	fmt.Println("✓ Workers started")
+	fmt.Println("\nController is now watching for Secret changes...")
 	fmt.Println("Try: kubectl apply -f scripts/test-secrets.yaml")
 	fmt.Println("Or:  kubectl edit secret <secret-name>")
 	fmt.Println("\nPress Ctrl+C to stop")
 
 	<-c.stopCh
+	fmt.Println("Stopping workers...")
+
 	return nil
 }
 
@@ -85,79 +100,123 @@ func (c *SecretController) Stop() {
 	close(c.stopCh)
 }
 
-// handleAdd is called when a new Secret is created in the cluster
-func (c *SecretController) handleAdd(obj interface{}) {
+// runWorker loops, processing items from the workqueue until shutdown
+func (c *SecretController) runWorker() {
+	for c.processNextWorkItem() {
+	}
+}
+
+// processNextWorkItem pulls one key from the queue and reconciles it. Returns false on shutdown
+func (c *SecretController) processNextWorkItem() bool {
+	key, shutdown := c.workqueue.Get()
+	if shutdown {
+		return false
+	}
+	defer c.workqueue.Done(key)
+
+	err := c.reconcile(key)
+	if err != nil {
+		c.workqueue.AddRateLimited(key)
+		fmt.Printf("Error reconciling %s (will retry): %v\n", key, err)
+		return true
+	}
+
+	c.workqueue.Forget(key)
+	return true
+}
+
+// reconcile fetches a Secret from the cache and checks its expiration status
+func (c *SecretController) reconcile(key string) error {
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		fmt.Printf("Invalid key format: %s\n", key)
+		return nil
+	}
+
+	obj, exists, err := c.informer.GetStore().GetByKey(key)
+	if err != nil {
+		return fmt.Errorf("error fetching object %s from cache: %w", key, err)
+	}
+
+	if !exists {
+		fmt.Printf("Secret %s no longer exists\n", key)
+		return nil
+	}
+
 	secret, ok := obj.(*corev1.Secret)
 	if !ok {
-		fmt.Printf("Error: unexpected type in handleAdd: %T\n", obj)
-		return
+		return fmt.Errorf("unexpected object type in cache: %T", obj)
 	}
 
 	info, hasExpiration := parseSecretInfo(secret)
 	if !hasExpiration {
+		return nil
+	}
+
+	fmt.Printf("Reconciling Secret %s/%s\n", namespace, name)
+	fmt.Printf("   Expires: %s (%d days)\n",
+		info.ExpiresAt.Format("2006-01-02"),
+		info.DaysUntilExp)
+
+	analyzeSecret(info)
+
+	return nil
+}
+
+// handleAdd enqueues newly created Secrets that have expiration annotations
+func (c *SecretController) handleAdd(obj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		fmt.Printf("Error getting key for added object: %v\n", err)
 		return
 	}
 
-	fmt.Printf("➕ ADD: Secret %s/%s (expires: %s)\n",
-		secret.Namespace,
-		secret.Name,
-		info.ExpiresAt.Format("2006-01-02"))
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return
+	}
 
-	analyzeSecret(info)
+	if _, hasExpiration := parseSecretInfo(secret); !hasExpiration {
+		return
+	}
+
+	fmt.Printf("ADD event: %s (queued for processing)\n", key)
+	c.workqueue.Add(key)
 }
 
-// handleUpdate is called when an existing Secret is modified
+// handleUpdate enqueues Secrets when expiration annotations are added, changed, or removed
 func (c *SecretController) handleUpdate(oldObj, newObj interface{}) {
 	oldSecret, ok := oldObj.(*corev1.Secret)
 	if !ok {
-		fmt.Printf("Error: unexpected type in handleUpdate (old): %T\n", oldObj)
 		return
 	}
 
 	newSecret, ok := newObj.(*corev1.Secret)
 	if !ok {
-		fmt.Printf("Error: unexpected type in handleUpdate (new): %T\n", newObj)
 		return
 	}
 
-	// Parse both old and new versions
-	oldInfo, hadExpiration := parseSecretInfo(oldSecret)
-	newInfo, hasExpiration := parseSecretInfo(newSecret)
-
-	// Case 1: Expiration annotation was removed
-	if hadExpiration && !hasExpiration {
-		fmt.Printf("UPDATE: Secret %s/%s - expiration tracking removed\n",
-			newSecret.Namespace, newSecret.Name)
+	// Filter out resync events
+	if oldSecret.ResourceVersion == newSecret.ResourceVersion {
 		return
 	}
 
-	// Case 2: Expiration annotation was added
-	if !hadExpiration && hasExpiration {
-		fmt.Printf("UPDATE: Secret %s/%s - expiration tracking added (expires: %s)\n",
-			newSecret.Namespace,
-			newSecret.Name,
-			newInfo.ExpiresAt.Format("2006-01-02"))
-		analyzeSecret(newInfo)
+	key, err := cache.MetaNamespaceKeyFunc(newObj)
+	if err != nil {
+		fmt.Printf("Error getting key for updated object: %v\n", err)
 		return
 	}
 
-	// Case 3: Neither version has expiration - ignore
-	if !hasExpiration {
-		return
-	}
+	_, oldHasExp := parseSecretInfo(oldSecret)
+	_, newHasExp := parseSecretInfo(newSecret)
 
-	// Case 4: Expiration date changed
-	if !oldInfo.ExpiresAt.Equal(newInfo.ExpiresAt) {
-		fmt.Printf("UPDATE: Secret %s/%s - expiration changed (%s → %s)\n",
-			newSecret.Namespace,
-			newSecret.Name,
-			oldInfo.ExpiresAt.Format("2006-01-02"),
-			newInfo.ExpiresAt.Format("2006-01-02"))
-		analyzeSecret(newInfo)
+	if oldHasExp || newHasExp {
+		fmt.Printf("UPDATE event: %s (queued for processing)\n", key)
+		c.workqueue.Add(key)
 	}
 }
 
-// handleDelete is called when a Secret is deleted from the cluster
+// handleDelete logs when a tracked Secret is removed from the cluster
 func (c *SecretController) handleDelete(obj interface{}) {
 	secret, ok := obj.(*corev1.Secret)
 	if !ok {
@@ -173,14 +232,17 @@ func (c *SecretController) handleDelete(obj interface{}) {
 		}
 	}
 
-	// Check if this was a managed Secret
-	_, hasExpiration := parseSecretInfo(secret)
-	if !hasExpiration {
+	if _, hasExpiration := parseSecretInfo(secret); !hasExpiration {
 		return
 	}
 
-	fmt.Printf("DELETE: Secret %s/%s (was tracking expiration)\n",
-		secret.Namespace, secret.Name)
+	key, err := cache.MetaNamespaceKeyFunc(secret)
+	if err != nil {
+		fmt.Printf("Error getting key for deleted object: %v\n", err)
+		return
+	}
+
+	fmt.Printf("DELETE event: %s (was tracking expiration)\n", key)
 }
 
 // parseSecretInfo extracts expiration information from a Secret's annotations
@@ -214,7 +276,7 @@ func parseSecretInfo(secret *corev1.Secret) (SecretInfo, bool) {
 	}, true
 }
 
-// parseDuration parses duration strings like "7d", "30d", "24h"
+// parseDuration extends time.ParseDuration with support for "d" (days)
 func parseDuration(s string) (time.Duration, error) {
 	if len(s) > 1 && s[len(s)-1] == 'd' {
 		daysStr := strings.TrimSuffix(s, "d")

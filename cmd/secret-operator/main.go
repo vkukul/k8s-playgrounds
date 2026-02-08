@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Secret Rotation Operator - Phase 3")
+	fmt.Println("Secret Rotation Operator - Phase 4")
 	fmt.Println("===================================")
 
 	// Step 1: Build Kubernetes client configuration
@@ -42,9 +42,11 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Start the controller with 2 worker goroutines
+	numWorkers := 2
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- ctrl.Run()
+		errCh <- ctrl.Run(numWorkers)
 	}()
 
 	// Wait for either:
