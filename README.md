@@ -149,9 +149,9 @@ This project is structured as a learning exercise. Here's the progression:
 - [x] Understand the cache and indexer
 
 ### Phase 4: Controller Logic
-- [ ] Implement work queue pattern
-- [ ] Build reconciliation loop
-- [ ] Check expiration dates and determine action
+- [x] Implement work queue pattern
+- [x] Build reconciliation loop
+- [x] Check expiration dates and determine action
 
 ### Phase 5: Taking Action
 - [ ] Create Kubernetes Events for expiring secrets
