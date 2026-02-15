@@ -154,9 +154,9 @@ This project is structured as a learning exercise. Here's the progression:
 - [x] Check expiration dates and determine action
 
 ### Phase 5: Taking Action
-- [ ] Create Kubernetes Events for expiring secrets
-- [ ] Add structured logging
-- [ ] Implement graceful shutdown
+- [x] Create Kubernetes Events for expiring secrets
+- [x] Add structured logging
+- [x] Implement graceful shutdown
 
 ## Key Concepts
 
