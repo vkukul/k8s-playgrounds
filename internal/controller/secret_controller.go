@@ -11,8 +11,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -21,10 +25,12 @@ const (
 )
 
 type SecretController struct {
-	clientset kubernetes.Interface
-	informer  cache.SharedIndexInformer
-	workqueue workqueue.TypedRateLimitingInterface[string]
-	stopCh    chan struct{}
+	clientset   kubernetes.Interface
+	informer    cache.SharedIndexInformer
+	workqueue   workqueue.TypedRateLimitingInterface[string]
+	recorder    record.EventRecorder
+	broadcaster record.EventBroadcaster
+	stopCh      chan struct{}
 }
 
 type SecretInfo struct {
@@ -35,7 +41,7 @@ type SecretInfo struct {
 	DaysUntilExp int
 }
 
-// NewSecretController creates a controller with an informer, workqueue, and event handlers
+// NewSecretController creates a controller with an informer, workqueue, event recorder, and event handlers
 func NewSecretController(clientset kubernetes.Interface) *SecretController {
 	informerFactory := informers.NewSharedInformerFactory(clientset, 30*time.Second)
 	secretInformer := informerFactory.Core().V1().Secrets().Informer()
@@ -44,11 +50,24 @@ func NewSecretController(clientset kubernetes.Interface) *SecretController {
 		workqueue.DefaultTypedControllerRateLimiter[string](),
 	)
 
+	// EventBroadcaster receives events and sends them to the API server
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+		Interface: clientset.CoreV1().Events(""),
+	})
+
+	// EventRecorder creates events attached to specific Kubernetes objects
+	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{
+		Component: "secret-operator",
+	})
+
 	controller := &SecretController{
-		clientset: clientset,
-		informer:  secretInformer,
-		workqueue: queue,
-		stopCh:    make(chan struct{}),
+		clientset:   clientset,
+		informer:    secretInformer,
+		workqueue:   queue,
+		recorder:    recorder,
+		broadcaster: broadcaster,
+		stopCh:      make(chan struct{}),
 	}
 
 	secretInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -65,38 +84,37 @@ func (c *SecretController) Run(workers int) error {
 	defer runtime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	fmt.Println("\nStarting Secret Rotation Controller")
-	fmt.Println("====================================")
+	klog.Info("Starting Secret Rotation Controller")
 
-	fmt.Println("Starting informer...")
+	klog.Info("Starting informer...")
 	go c.informer.Run(c.stopCh)
 
-	fmt.Println("Waiting for informer cache to sync...")
+	klog.Info("Waiting for informer cache to sync...")
 	if !cache.WaitForCacheSync(c.stopCh, c.informer.HasSynced) {
 		return fmt.Errorf("failed to sync informer cache")
 	}
-	fmt.Println("✓ Cache synced successfully")
+	klog.Info("Cache synced successfully")
 
-	fmt.Printf("\nStarting %d worker(s)...\n", workers)
+	klog.Infof("Starting %d worker(s)...", workers)
 	for i := 0; i < workers; i++ {
 		go wait.Until(c.runWorker, time.Second, c.stopCh)
 	}
 
-	fmt.Println("✓ Workers started")
-	fmt.Println("\nController is now watching for Secret changes...")
-	fmt.Println("Try: kubectl apply -f scripts/test-secrets.yaml")
+	klog.Info("Workers started. Watching for Secret changes...")
+	fmt.Println("\nTry: kubectl apply -f scripts/test-secrets.yaml")
 	fmt.Println("Or:  kubectl edit secret <secret-name>")
-	fmt.Println("\nPress Ctrl+C to stop")
+	fmt.Println("Press Ctrl+C to stop")
 
 	<-c.stopCh
-	fmt.Println("Stopping workers...")
+	klog.Info("Stopping workers...")
 
 	return nil
 }
 
-// Stop gracefully shuts down the controller
+// Stop gracefully shuts down the controller and event broadcaster
 func (c *SecretController) Stop() {
-	fmt.Println("\n\nShutting down controller...")
+	klog.Info("Shutting down controller...")
+	c.broadcaster.Shutdown()
 	close(c.stopCh)
 }
 
@@ -117,7 +135,7 @@ func (c *SecretController) processNextWorkItem() bool {
 	err := c.reconcile(key)
 	if err != nil {
 		c.workqueue.AddRateLimited(key)
-		fmt.Printf("Error reconciling %s (will retry): %v\n", key, err)
+		klog.Errorf("Error reconciling %s (will retry): %v", key, err)
 		return true
 	}
 
@@ -125,11 +143,11 @@ func (c *SecretController) processNextWorkItem() bool {
 	return true
 }
 
-// reconcile fetches a Secret from the cache and checks its expiration status
+// reconcile fetches a Secret from the cache, checks its expiration, and emits Kubernetes Events
 func (c *SecretController) reconcile(key string) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		fmt.Printf("Invalid key format: %s\n", key)
+		klog.Errorf("Invalid key format: %s", key)
 		return nil
 	}
 
@@ -139,7 +157,7 @@ func (c *SecretController) reconcile(key string) error {
 	}
 
 	if !exists {
-		fmt.Printf("Secret %s no longer exists\n", key)
+		klog.Infof("Secret %s no longer exists", key)
 		return nil
 	}
 
@@ -153,21 +171,45 @@ func (c *SecretController) reconcile(key string) error {
 		return nil
 	}
 
-	fmt.Printf("Reconciling Secret %s/%s\n", namespace, name)
-	fmt.Printf("   Expires: %s (%d days)\n",
+	klog.Infof("Reconciling %s/%s | expires: %s | days: %d",
+		namespace, name,
 		info.ExpiresAt.Format("2006-01-02"),
 		info.DaysUntilExp)
 
-	analyzeSecret(info)
+	c.emitExpirationEvent(secret, info)
 
 	return nil
+}
+
+// emitExpirationEvent creates a Kubernetes Event on the Secret based on its expiration status
+func (c *SecretController) emitExpirationEvent(secret *corev1.Secret, info SecretInfo) {
+	warnThresholdDays := int(info.WarnBefore.Hours() / 24)
+
+	if info.DaysUntilExp < 0 {
+		klog.Warningf("  EXPIRED %d days ago: %s/%s", -info.DaysUntilExp, info.Namespace, info.Name)
+		c.recorder.Eventf(secret, corev1.EventTypeWarning, "SecretExpired",
+			"Secret expired %d days ago (expired on %s)",
+			-info.DaysUntilExp, info.ExpiresAt.Format("2006-01-02"))
+
+	} else if info.DaysUntilExp <= warnThresholdDays {
+		klog.Warningf("  EXPIRING SOON in %d days: %s/%s", info.DaysUntilExp, info.Namespace, info.Name)
+		c.recorder.Eventf(secret, corev1.EventTypeWarning, "SecretExpiringSoon",
+			"Secret expires in %d days (on %s). Warning threshold: %d days",
+			info.DaysUntilExp, info.ExpiresAt.Format("2006-01-02"), warnThresholdDays)
+
+	} else {
+		klog.Infof("  OK: %d days remaining for %s/%s", info.DaysUntilExp, info.Namespace, info.Name)
+		c.recorder.Eventf(secret, corev1.EventTypeNormal, "SecretValid",
+			"Secret is valid. Expires in %d days (on %s)",
+			info.DaysUntilExp, info.ExpiresAt.Format("2006-01-02"))
+	}
 }
 
 // handleAdd enqueues newly created Secrets that have expiration annotations
 func (c *SecretController) handleAdd(obj interface{}) {
 	key, err := cache.MetaNamespaceKeyFunc(obj)
 	if err != nil {
-		fmt.Printf("Error getting key for added object: %v\n", err)
+		klog.Errorf("Error getting key for added object: %v", err)
 		return
 	}
 
@@ -180,7 +222,7 @@ func (c *SecretController) handleAdd(obj interface{}) {
 		return
 	}
 
-	fmt.Printf("ADD event: %s (queued for processing)\n", key)
+	klog.V(2).Infof("ADD event: %s", key)
 	c.workqueue.Add(key)
 }
 
@@ -203,7 +245,7 @@ func (c *SecretController) handleUpdate(oldObj, newObj interface{}) {
 
 	key, err := cache.MetaNamespaceKeyFunc(newObj)
 	if err != nil {
-		fmt.Printf("Error getting key for updated object: %v\n", err)
+		klog.Errorf("Error getting key for updated object: %v", err)
 		return
 	}
 
@@ -211,7 +253,7 @@ func (c *SecretController) handleUpdate(oldObj, newObj interface{}) {
 	_, newHasExp := parseSecretInfo(newSecret)
 
 	if oldHasExp || newHasExp {
-		fmt.Printf("UPDATE event: %s (queued for processing)\n", key)
+		klog.V(2).Infof("UPDATE event: %s", key)
 		c.workqueue.Add(key)
 	}
 }
@@ -222,12 +264,12 @@ func (c *SecretController) handleDelete(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			fmt.Printf("Error: unexpected type in handleDelete: %T\n", obj)
+			klog.Errorf("Unexpected type in handleDelete: %T", obj)
 			return
 		}
 		secret, ok = tombstone.Obj.(*corev1.Secret)
 		if !ok {
-			fmt.Printf("Error: tombstone contained unexpected type: %T\n", tombstone.Obj)
+			klog.Errorf("Tombstone contained unexpected type: %T", tombstone.Obj)
 			return
 		}
 	}
@@ -238,12 +280,14 @@ func (c *SecretController) handleDelete(obj interface{}) {
 
 	key, err := cache.MetaNamespaceKeyFunc(secret)
 	if err != nil {
-		fmt.Printf("Error getting key for deleted object: %v\n", err)
+		klog.Errorf("Error getting key for deleted object: %v", err)
 		return
 	}
 
-	fmt.Printf("DELETE event: %s (was tracking expiration)\n", key)
+	klog.Infof("DELETE: %s (was tracking expiration)", key)
 }
+
+// Helpers
 
 // parseSecretInfo extracts expiration information from a Secret's annotations
 func parseSecretInfo(secret *corev1.Secret) (SecretInfo, bool) {
@@ -287,20 +331,4 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
-}
-
-// analyzeSecret checks the expiration status and prints appropriate warnings
-func analyzeSecret(info SecretInfo) {
-	warnThresholdDays := int(info.WarnBefore.Hours() / 24)
-
-	if info.DaysUntilExp < 0 {
-		fmt.Printf("   EXPIRED %d days ago - action required!\n", -info.DaysUntilExp)
-	} else if info.DaysUntilExp <= warnThresholdDays {
-		fmt.Printf("   EXPIRING SOON: %d days remaining (within %d day warning threshold)\n",
-			info.DaysUntilExp, warnThresholdDays)
-	} else {
-		fmt.Printf("   OK: %d days until warning threshold\n",
-			info.DaysUntilExp-warnThresholdDays)
-	}
-	fmt.Println()
 }

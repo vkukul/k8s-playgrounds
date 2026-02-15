@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"flag"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -10,78 +10,63 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 
 	"github.com/vkukul/k8s-playgrounds/internal/controller"
 )
 
 func main() {
-	fmt.Println("Secret Rotation Operator - Phase 4")
-	fmt.Println("===================================")
+	klog.InitFlags(nil)
+	flag.Parse()
+	defer klog.Flush()
 
-	// Step 1: Build Kubernetes client configuration
+	klog.Info("Secret Rotation Operator starting...")
+
 	config, err := buildConfig()
 	if err != nil {
-		fmt.Printf("Error building kubeconfig: %v\n", err)
-		os.Exit(1)
+		klog.Fatalf("Error building kubeconfig: %v", err)
 	}
-	fmt.Println("✓ Loaded kubeconfig successfully")
 
-	// Step 2: Create Kubernetes clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		fmt.Printf("Error creating clientset: %v\n", err)
-		os.Exit(1)
+		klog.Fatalf("Error creating clientset: %v", err)
 	}
-	fmt.Println("✓ Created Kubernetes clientset")
 
-	// Step 3: Create the controller
 	ctrl := controller.NewSecretController(clientset)
-	fmt.Println("✓ Created Secret controller")
 
-	// Step 4: Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start the controller with 2 worker goroutines
 	numWorkers := 2
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- ctrl.Run(numWorkers)
 	}()
 
-	// Wait for either:
-	// 1. A signal (Ctrl+C, SIGTERM)
-	// 2. The controller to return an error
-	// 3. The controller to exit normally
 	select {
 	case <-sigCh:
-		fmt.Println("\n\nReceived interrupt signal")
+		klog.Info("Received interrupt signal")
 		ctrl.Stop()
 	case err := <-errCh:
 		if err != nil {
-			fmt.Printf("Controller error: %v\n", err)
-			os.Exit(1)
+			klog.Fatalf("Controller error: %v", err)
 		}
 	}
 
-	fmt.Println("✓ Controller stopped gracefully")
-	fmt.Println("\nThank you for using Secret Rotation Operator!")
+	klog.Info("Controller stopped gracefully")
 }
 
-// buildConfig creates a Kubernetes client configuration.
-// It tries to load the kubeconfig file from:
-//  1. The KUBECONFIG environment variable (if set)
-//  2. The default location: ~/.kube/config
+// buildConfig loads kubeconfig from KUBECONFIG env var or ~/.kube/config
 func buildConfig() (*rest.Config, error) {
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, fmt.Errorf("cannot find home directory: %w", err)
+			return nil, err
 		}
 		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
 
-	fmt.Printf("Using kubeconfig: %s\n", kubeconfig)
+	klog.Infof("Using kubeconfig: %s", kubeconfig)
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
