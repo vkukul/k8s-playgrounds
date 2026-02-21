@@ -101,31 +101,40 @@ make create-test-secret
 
 ```
 k8s-playgrounds/
-├── README.md                 # This file
-├── Makefile                  # Build and development commands
-├── go.mod                    # Go module definition
-├── go.sum                    # Go dependency checksums
+├── README.md
+├── Dockerfile                    # Multi-stage Docker build
+├── Makefile                      # Build, test, deploy commands
+├── go.mod
+├── go.sum
 ├── cmd/
 │   └── secret-operator/
-│       └── main.go           # Application entry point
+│       └── main.go               # Application entry point
 ├── internal/
-│   └── controller/           # Controller implementation
-│       ├── controller.go     # Main controller logic
-│       └── secret.go         # Secret-specific handlers
+│   └── controller/
+│       └── secret_controller.go  # Controller logic
+├── deploy/                       # Kubernetes manifests
+│   ├── namespace.yaml
+│   ├── serviceaccount.yaml
+│   ├── rbac.yaml
+│   └── deployment.yaml
 └── scripts/
-    └── test-secrets.yaml     # Sample secrets for testing
+    └── test-secrets.yaml         # Sample secrets for testing
 ```
 
 ### Common Commands
 
 ```bash
-make help          # Show all available commands
-make build         # Build the operator binary
-make run           # Run the operator locally
-make test          # Run unit tests
-make lint          # Run linter
-make cluster-start # Start minikube cluster
-make cluster-stop  # Stop minikube cluster
+make help            # Show all available commands
+make build           # Build the operator binary
+make run             # Run the operator locally
+make test            # Run unit tests
+make docker-build    # Build Docker image
+make docker-load     # Load image into minikube
+make deploy          # Deploy to minikube cluster
+make undeploy        # Remove from cluster
+make deploy-logs     # Tail operator pod logs
+make cluster-start   # Start minikube cluster
+make cluster-stop    # Stop minikube cluster
 ```
 
 ## Learning Path
@@ -157,6 +166,55 @@ This project is structured as a learning exercise. Here's the progression:
 - [x] Create Kubernetes Events for expiring secrets
 - [x] Add structured logging
 - [x] Implement graceful shutdown
+
+### Phase 6: Containerize & Deploy
+- [x] Create multi-stage Dockerfile
+- [x] Add in-cluster config support
+- [x] Create RBAC manifests (ServiceAccount, ClusterRole, ClusterRoleBinding)
+- [x] Create Deployment manifest
+- [x] Deploy to minikube and verify
+
+## Deploying to Kubernetes
+
+### Build and Load the Image
+
+```bash
+# Build the Docker image
+make docker-build
+
+# Load it into minikube (no registry needed)
+make docker-load
+```
+
+### Deploy
+
+```bash
+# Apply all manifests (namespace, RBAC, deployment)
+make deploy
+
+# Check the operator is running
+make deploy-status
+
+# View logs
+make deploy-logs
+```
+
+### Verify Events
+
+```bash
+# Create test secrets
+make create-test-secret
+
+# Check events created by the in-cluster operator
+kubectl get events --field-selector reason=SecretExpired
+kubectl describe secret expired-secret-key
+```
+
+### Cleanup
+
+```bash
+make undeploy
+```
 
 ## Key Concepts
 
