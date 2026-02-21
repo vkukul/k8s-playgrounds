@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secret-operator
+  namespace: secret-operator
+  labels:
+    app: secret-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: secret-operator
+  template:
+    metadata:
+      labels:
+        app: secret-operator
+    spec:
+      serviceAccountName: secret-operator
+      containers:
+        - name: secret-operator
+          image: secret-operator:latest
+          imagePullPolicy: Never
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

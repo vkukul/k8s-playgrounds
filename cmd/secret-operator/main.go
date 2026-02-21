@@ -56,8 +56,15 @@ func main() {
 	klog.Info("Controller stopped gracefully")
 }
 
-// buildConfig loads kubeconfig from KUBECONFIG env var or ~/.kube/config
+// buildConfig tries in-cluster config first (for running inside a pod),
+// then falls back to kubeconfig for local development
 func buildConfig() (*rest.Config, error) {
+	config, err := rest.InClusterConfig()
+	if err == nil {
+		klog.Info("Using in-cluster config")
+		return config, nil
+	}
+
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		home, err := os.UserHomeDir()
